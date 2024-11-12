@@ -14,10 +14,10 @@
 \newcommand*{\getFaculty}{Informatics}
 \newcommand*{\getDegree}{Informatics}
 \newcommand*{\getSchool}{Computation, Information and Technology}
-\newcommand*{\getTitle}{Thesis title}
+\newcommand*{\getTitle}{Fine-grained communication compression for LLMs}
 \newcommand*{\getTitleGer}{Titel der Abschlussarbeit}
-\newcommand*{\getAuthor}{Author}
-\newcommand*{\getDoctype}{Bachelor's Thesis, Master's Thesis, \ldots}
+\newcommand*{\getAuthor}{Jan Hansen-Palmus}
+\newcommand*{\getDoctype}{Master's Thesis}
 \newcommand*{\getSupervisor}{Supervisor}
 \newcommand*{\getAdvisor}{Advisor}
 \newcommand*{\getSubmissionDate}{Submission date}
@@ -37,13 +37,17 @@
 \input{pages/acknowledgments}
 \input{pages/abstract}
 \microtypesetup{protrusion=false}
-\tableofcontents{}
+\tableofcontents
 \microtypesetup{protrusion=true}
 
 \mainmatter{}
 
 \input{chapters/01_introduction}
-% TODO: add more chapters here
+\input{chapters/02_background}
+\input{chapters/03_method}
+\input{chapters/04_sota}
+\input{chapters/05_advanced}
+\input{chapters/rest}
 
 \appendix{}
 

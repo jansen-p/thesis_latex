@@ -1,0 +1,57 @@
+% !TeX root = ../main.tex
+% Add the above to each chapter to make compiling the PDF easier in some editors.
+
+\chapter{Background}
+\section{LLM inference}
+\subsection{Prefill vs. decode}
+Latency is a key metric for evaluating a model’s inference speed, representing the time it takes to generate an output for a given prompt.
+
+Since LLMs operate in two distinct phases, the \textit{prefill} and \textit{decode} phases \parencite{efficientlyscaling}, which exhibit fundamentally different characteristics, latency is typically measured separately for each phase.
+
+In the prefill phase, the model processes multiple input tokens present in the prompt. Because all tokens are available at once, this phase can be highly parallelized, making it primarily compute-bound. To avoid re-computation of key-value activations, these activations are stored (known as KV-cache) \parencite{kivi, cachegen, flexgen, kvquant} and re-used during decoding phase. 
+
+In contrast, the decode phase involves generating tokens in an auto-regressive manner, where each token depends on the previously generated ones. This sequential process is not parallelizeable, and most of the computation time is spent accessing the KV-cache and weights from memory \parencite{kvquant, kivi}. As a result, the decoding phase is memory-bound.
+
+\subsection{Tensor Parallelism}
+Given the massive parameter and operations requirement of modern LLMs \parencite{llama3, llmsurvey}, distributing their parameters and operations across a large number of accelerators is essential, which is achieved through different parallelism techniques. The most common parallelism techniques used to fit LLMs on multiple accelerators for inference are methods \parencite{megatron, reducingactivationrecomputation, zero, optimizingcommunication}: 
+\begin{enumerate}
+\item \textbf{Pipeline Parallelism} (PP), which distributes model parameters and layers among multiple accelerators. It is important to note that PP does not improve model latency.
+\item \textbf{Tensor Parallelism} (TP), which distributes each layer's weights and operations among multiple accelerators. TP requires communication of activations to fully compute the results of each layer, but allows great improvement in model latency.
+\item \textbf{Sequence Parallelism} (SP) \parencite{reducingactivationrecomputation}, which parallelizes along the sequence dimension and is used for layer which do not have inter-token dependendency like Layer Normalization and Dropout.
+\end{enumerate}
+
+Among all the available techniques TP is usually the most widely used one because it allows a very effective way of scaling down of latency and model size per accelerator. Other parallelism strategies are combined with TP to improve further upon it. TP also has two possible sub-variants: Column-wise and Row-wise parallelism, introduced by \cite{megatron} , enable the partitioning of linear layers along the column or row dimension of weights respectively. Both of this sub-variants can be applied in conjunction to consecutive layers in Attention and MLP blocks of LLM to reduce activation communication.
+
+Nevertheless, while tensor parallelism offers significant benefits, it also increases communication overhead, as results computed on individual accelerators must be frequently synchronized using \verb|all_gather|, \verb|all_reduce|, \verb|reduce_scatter| collective operations. This is typically handled by NCCL for NVIDIA GPUs, \cite{mpimessagepassinginterfacestandard}, which supports communication of the usual 8, 16, 32 and 64 bit datatypes \parencite{nccl}. This becomes particularly problematic during the prefill phase, where activation tensors for the entire token sequence need to be transmitted, often leading to communication bottlenecks \parencite{optimizingcommunication, mnemosyne}. While \cite{tpcompression} explored various approaches to reduce communication overhead during training, to the best of our knowledge, this issue has not yet been addressed for inference time by the research community.
+
+
+\section{Model Quantization}
+The quantization of weights and/or activations of LLMs \parencite{atom, awq,flexgen,gear, smoothquant, rptq, gptq} has been a very active field of research. Quantization of weights to lower bit-widths reduces the memory needed to store parameters and also improves throughput due to better memory bandwidth utilization. Furthermore, quantization of activations and also computations allows reducing activation memory footprint and improves throughput as well by utilizing faster and cheaper computation engines on recent accelerators \parencite{blackwell}. 
+
+Unlike weights, activations are hard to quantize due to their dynamic nature \parencite{atom, flexgen} and the presence of outliers, which has been extensively studied in literature \parencite{llmint8, awq, smoothquant}. \cite{llmint8} found that accurately representing these outliers is critical for maintaining model performance: Even though outliers represent only a small fraction of input features, removing them leads to a significant degradation in Perplexity.
+
+A naive approach to activation quantization, per-tensor quantization, is to normalize the values based on the tensor’s absolute maximum. \textcolor{red}{Add formulas here (ATOM)}. However, this can be problematic due to the presence of outlier values. Using the absolute maximum, which is dominated by these outliers, leads to poor representation of the remaining values in the tensor, as they become compressed into a narrow range and lose precision.
+
+To address this issue, various solutions have been developed. One approach is to limit the impact of outliers by grouping tensor values and quantizing them together, which helps reducing the quantization error. For per-token and per-channel quantization, a scaling factor is shared among all values within the same column or row. Group quantization takes per-channel quantization a step further by grouping small blocks of values within each channel and quantizing them independently, which reduces quantization errors further. \textcolor{red}{figure comparing channel/token quant and group quant}.
+Mixed precision methods \parencite{atom, llmint8, gear, kvquant}, on the other hand, distinguish between outliers and non-outliers, using different data types for each group during quantization. 
+
+Since we compress activations of specific layers, in the following section, we briefly review methods related to low-bit activation quantization.
+
+\subsection{KV-cache Quantization}
+KV-cache quantization addresses the challenge of efficiently quantizing key and value activations generated during both the prefill and decoding phases. Substantial size of the KV-cache tensors can cause a memory bottleneck and limit the input and output size of LLMs. As a result, reducing the effective size of the KV-cache is crucial for minimizing latency and improving overall efficiency.
+
+\cite{kivi} observed distinct outlier characteristics between Key and Value caches and found that per-channel and per-token quantization techniques work effectively for each, respectively. Additionally, they identified the use of a sliding window as essential for low-bit quantization, which maintains the KV-cache of the most recent tokens in full precision, helping to preserve accuracy while reducing the overall cache size. 
+\cite{flexgen} employs group-wise quantization to limit the effect of outliers efficiently. \cite{kvquant, gear} propose extracting a sparse outlier matrix composed of the top 1-2\% of the largest values, which are preserved in higher precision.
+
+KV-cache quantization methods focus on compressing activations to reduce memory bottlenecks while loading tensors in accelerator engines. These methods can improve model latency as well by fusing kernels for compressed KV cache loading and matrix multiplications. Our method on the contrary targets accumulation (\verb|all_gather|) of compressed activations after row-wise TP linear layers. Compression and decompression of activations have to be done at much lower computational complexity, otherwise any latency saving by communication compression is offset by the extra computational latency.
+
+\subsection{Weight and Activation Quantization}
+The primary objective of weights and activation quantization is to reduce the overall model size while accelerating inference \parencite{understanding, atom} by the use of specialized hardware, such as Nvidia's INT4 Tensor Cores \parencite{blackwell}. Due to hardware limitations, these approaches mostly focus on 4- and 8-bit quantization, and don't need to deal with tweaking of the number of bits for more fine-grained quantization.
+\cite{ocp_specification} introduces low-bit data formats tailored for the use with specialized hardware, applicable to matrix multiplication operations. In this method, a block of values is encoded in a low-bit floating-point format along with a shared exponent.
+
+Other approaches employ mixed-precision techniques to address the challenge of dealing with outliers. However, this necessitates a definition what an outlier or outlier channel is. \cite{llmint8} observed keeping all channels with an absolute maximum value above 6 in high-precision is sufficient to stop perplexity degradation. Other papers \textcolor{red}{cite more papers} based their work on this finding.
+\cite{atom} represents the 128 outlier channels with the largest square of summed values with 8 bits per value, as they deemed this sufficient. 
+
+\textcolor{red}{Cite more papers. What about SPDY, Evopress, SpinQuant, MixLLM...?}
+
+\textcolor{red}{Atom... keep fixed \% of channels in high-prec. There are papers (shortGPT, mixLLM which address/improve this and optimize it layer-wise.}
